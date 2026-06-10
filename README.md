@@ -4,6 +4,9 @@ A macOS clipboard history manager that copies the Windows **Win+V** experience:
 press **⌘⇧V** anywhere to open a floating history panel, pick an item, and it
 is pasted straight into the app you were using.
 
+<img width="426" height="486" alt="image" src="https://github.com/user-attachments/assets/89565718-c4e5-405b-8ebf-5aeca2a66360" />
+
+
 ## Features
 
 - Clipboard monitoring for **text and images**, with duplicate de-duping
