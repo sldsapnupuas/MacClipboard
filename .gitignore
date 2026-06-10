@@ -14,7 +14,10 @@ MacClipboard.app/
 .idea/
 *.swp
 *.swo
+.claude/
+
 
 # OS
 .DS_Store
 Thumbs.db
+.gitignore
