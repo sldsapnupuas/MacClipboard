@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sw_vers)",
+      "Bash(swift --version)",
+      "Bash(swift build *)",
+      "Bash(./build-app.sh)",
+      "Bash(codesign -dv MacClipboard.app)"
+    ]
+  }
+}
