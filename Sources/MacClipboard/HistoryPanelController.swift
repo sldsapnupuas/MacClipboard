@@ -16,7 +16,10 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
     private let state = PanelState()
 
     private var panel: NSPanel?
+    private var keyTap: CFMachPort?
+    private var keyTapSource: CFRunLoopSource?
     private var keyMonitor: Any?
+    private var clickMonitor: Any?
     private var previousApp: NSRunningApplication?
 
     func toggle() {
@@ -33,12 +36,23 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
 
         let panel = self.panel ?? makePanel()
         position(panel)
-        panel.makeKeyAndOrderFront(nil)
-        installKeyMonitor()
+        // Show without taking key focus: stealing it makes Spotlight's search
+        // field lose its cursor and confuses focus under Stage Manager. Keys
+        // arrive via a CGEvent tap instead. If the tap can't be created (no
+        // Accessibility permission yet), fall back to becoming key.
+        if installKeyTap() {
+            panel.orderFrontRegardless()
+        } else {
+            panel.makeKeyAndOrderFront(nil)
+            installKeyMonitor()
+        }
+        installClickMonitor()
     }
 
     func hide() {
+        removeKeyTap()
         removeKeyMonitor()
+        removeClickMonitor()
         panel?.orderOut(nil)
     }
 
@@ -58,6 +72,7 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.becomesKeyOnlyIfNeeded = true
         panel.isReleasedWhenClosed = false
         panel.delegate = self
 
@@ -90,6 +105,71 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
     }
 
     // MARK: - Keyboard handling
+
+    /// Intercepts key-downs system-wide while the panel is visible, so the
+    /// panel can be navigated without ever being the key window. Returns
+    /// false if the tap couldn't be created (Accessibility not granted).
+    private func installKeyTap() -> Bool {
+        removeKeyTap()
+
+        let callback: CGEventTapCallBack = { _, type, cgEvent, userInfo in
+            let passthrough = Unmanaged.passUnretained(cgEvent)
+            guard let userInfo else { return passthrough }
+            let controller = Unmanaged<HistoryPanelController>.fromOpaque(userInfo).takeUnretainedValue()
+
+            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                if let tap = controller.keyTap { CGEvent.tapEnable(tap: tap, enable: true) }
+                return passthrough
+            }
+            guard controller.panel?.isVisible == true,
+                  let event = NSEvent(cgEvent: cgEvent) else { return passthrough }
+            return controller.handle(event) ? nil : passthrough
+        }
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(1 << CGEventType.keyDown.rawValue),
+            callback: callback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else { return false }
+
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        keyTap = tap
+        keyTapSource = source
+        return true
+    }
+
+    private func removeKeyTap() {
+        guard let keyTap else { return }
+        CGEvent.tapEnable(tap: keyTap, enable: false)
+        if let keyTapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), keyTapSource, .commonModes)
+        }
+        self.keyTap = nil
+        keyTapSource = nil
+    }
+
+    /// Global monitors only see events in other apps, so clicks on the
+    /// panel itself don't dismiss it.
+    private func installClickMonitor() {
+        removeClickMonitor()
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] _ in
+            self?.hide()
+        }
+    }
+
+    private func removeClickMonitor() {
+        if let clickMonitor {
+            NSEvent.removeMonitor(clickMonitor)
+            self.clickMonitor = nil
+        }
+    }
 
     private func installKeyMonitor() {
         removeKeyMonitor()
@@ -153,10 +233,23 @@ final class HistoryPanelController: NSObject, NSWindowDelegate {
         store.copyToPasteboard(item)
         hide()
 
-        previousApp?.activate()
-        // Give the target app a beat to become active before the keystroke.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            Paster.sendCmdV()
+        // The panel never took key focus, so the target app normally still
+        // has it. Only re-activate if something else took over — re-asserting
+        // focus dismisses transient overlays like Spotlight.
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        if let previousApp,
+           previousApp.processIdentifier != frontmost?.processIdentifier {
+            previousApp.activate()
+            // Give the target app a beat to become active before the keystroke.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                Paster.sendCmdV()
+            }
+        } else {
+            // Next runloop pass, so the keystroke isn't posted from inside
+            // the event-tap callback that delivered the selection key.
+            DispatchQueue.main.async {
+                Paster.sendCmdV()
+            }
         }
     }
 
